@@ -1,0 +1,161 @@
+--- a/src/vm/datarec.h
++++ b/src/vm/datarec.h
+@@ -88,6 +88,8 @@
+ 	int load_t77_image();
+ 	int load_tap_image();
+ 	int load_mzt_image();
++	int load_mzm_image();
++	bool is_multiblock_text();
+ 	int load_p6_image(bool is_p6t);
+ 	int load_bmjr_image();
+ 	int load_cas_image();
+--- a/src/vm/datarec.cpp
++++ b/src/vm/datarec.cpp
+@@ -482,11 +482,29 @@
+ 			}
+ 		} else if(check_file_extension(play_fio->FilePath(), _T(".mzt")) || check_file_extension(play_fio->FilePath(), _T(".mzf")) || check_file_extension(play_fio->FilePath(), _T(".m12"))) {
+ 			// SHARP MZ series tape image
++#if defined(_MZ80K) || defined(_MZ80A) || defined(_MZ1200)
++			if(is_multiblock_text()) {
++				// FORM text source (attribute 0x04): recorded in 256-byte blocks
++				if((buffer_length = load_mzm_image()) != 0) {
++					buffer = (uint8_t *)malloc(buffer_length);
++					load_mzm_image();
++					play = is_wav = true;
++				}
++			} else if((buffer_length = load_mzt_image()) != 0) {
++#else
+ 			if((buffer_length = load_mzt_image()) != 0) {
++#endif
+ 				buffer = (uint8_t *)malloc(buffer_length);
+ 				load_mzt_image();
+ 				play = is_wav = true;
+ 			}
++		} else if(check_file_extension(play_fio->FilePath(), _T(".mzm"))) {
++			// SHARP MZ series tape image for text file (multi-block)
++			if((buffer_length = load_mzm_image()) != 0) {
++				buffer = (uint8_t *)malloc(buffer_length);
++				load_mzm_image();
++				play = is_wav = true;
++			}
+ 		} else if(check_file_extension(play_fio->FilePath(), _T(".mtw"))) {
+ 			// skip mzt image
+ 			uint8_t header[128];
+@@ -1256,6 +1274,98 @@
+ 	}
+ 	return ptr;
+ }
++
++bool DATAREC::is_multiblock_text()
++{
++	// text source files saved by FORM carry the file attribute 0x04 in
++	// the tape header; OBJ (machine code) and GAME-MZ source files are
++	// 0x01 and are loaded as a single block. FORM files are recorded in
++	// 256-byte blocks, so they have to be played back block by block,
++	// like .mzm files.
++	uint8_t header[128];
++	play_fio->Fseek(0, FILEIO_SEEK_SET);
++	if(play_fio->Fread(header, sizeof(header), 1) != 1) {
++		return false;
++	}
++	return (header[0] == 0x04);
++}
++
++int DATAREC::load_mzm_image()
++{
++	sample_rate = 48000;
++	sample_usec = 1000000. / sample_rate;
++	
++	// get file size
++	play_fio->Fseek(0, FILEIO_SEEK_END);
++	int file_size = play_fio->Ftell();
++	play_fio->Fseek(0, FILEIO_SEEK_SET);
++	
++	// load mzm file
++	// multi-block load patch for EmuZ-80K (2012/04/14, by madogiwaha),
++	// ported to the 2026-01-01 source structure: the payload of a single
++	// mzt-style header is output in 256-byte tape blocks, each block with
++	// its own tape leader, so that programs which load text data block
++	// by block (e.g. FORM programs) can read it.
++	int ptr = 0;
++	if(file_size > 128) {
++		// load header
++		uint8_t header[128], ram[0x20000];
++		play_fio->Fread(header, sizeof(header), 1);
++		file_size -= sizeof(header);
++		
++		uint16_t size = header[0x12] | (header[0x13] << 8);
++		uint16_t offs = header[0x14] | (header[0x15] << 8);
++		memset(ram, 0, sizeof(ram));
++		play_fio->Fread(ram + offs, size, 1);
++		file_size -= size;
++		
++		// output header to buffer
++#if defined(_MZ80B) || defined(_MZ2000) || defined(_MZ2200)
++		MZT_PUT_SIGNAL(0, sample_rate);
++		MZT_PUT_BIT(0, 22000);
++		MZT_PUT_BIT(1, 40);
++		MZT_PUT_BIT(0, 41);
++		MZT_PUT_BLOCK(header, 128);
++		MZT_PUT_BIT(1, 1);
++		MZT_PUT_SIGNAL(1, (int)(22.0 * sample_rate / 22050.0 + 0.5));
++		MZT_PUT_SIGNAL(0, (int)(22.0 * sample_rate / 22050.0 + 0.5));
++		MZT_PUT_SIGNAL(0, sample_rate);
++#else
++		MZT_PUT_BIT(0, 10000);
++		MZT_PUT_BIT(1, 40);
++		MZT_PUT_BIT(0, 40);
++		MZT_PUT_BIT(1, 1);
++		MZT_PUT_BLOCK(header, 128);
++		MZT_PUT_BIT(1, 1);
++		MZT_PUT_BIT(0, 256);
++		MZT_PUT_BLOCK(header, 128);
++		MZT_PUT_BIT(1, 1);
++		MZT_PUT_SIGNAL(0, sample_rate);
++#endif
++		
++		// output data to buffer, split into 256-byte blocks
++		uint16_t remain_size = size;
++		uint16_t block_offs = offs;
++		while(remain_size > 0) {
++			uint16_t block_size = (remain_size > 256) ? 256 : remain_size;
++#if defined(_MZ80B) || defined(_MZ2000) || defined(_MZ2200)
++			MZT_PUT_BIT(0, 11000);
++			MZT_PUT_BIT(1, 20);
++			MZT_PUT_BIT(0, 21);
++#else
++			MZT_PUT_BIT(0, 10000);
++			MZT_PUT_BIT(1, 20);
++			MZT_PUT_BIT(0, 20);
++			MZT_PUT_BIT(1, 1);
++#endif
++			MZT_PUT_BLOCK(ram + block_offs, block_size);
++			MZT_PUT_BIT(1, 1);
++			remain_size -= block_size;
++			block_offs += block_size;
++		}
++	}
++	return ptr;
++}
+ 
+ // NEC PC-6001/6601 series tape image
+ 
+--- a/src/win32/winmain.cpp
++++ b/src/win32/winmain.cpp
+@@ -3001,7 +3001,7 @@
+ 		play ? _T("Supported Files (*.cas;*.cmt;*.n80;*.t88)\0*.cas;*.cmt;*.n80;*.t88\0All Files (*.*)\0*.*\0\0")
+ 		     : _T("Supported Files (*.cas;*.cmt)\0*.cas;*.cmt\0All Files (*.*)\0*.*\0\0"),
+ #elif defined(_MZ80A) || defined(_MZ80K) || defined(_MZ1200) || defined(_MZ700) || defined(_MZ800) || defined(_MZ1500)
+-		play ? _T("Supported Files (*.wav;*.cas;*.mzt;*.mzf;*.m12;*.gz)\0*.wav;*.cas;*.mzt;*.mzf;*.m12;*.gz\0All Files (*.*)\0*.*\0\0")
++		play ? _T("Supported Files (*.wav;*.cas;*.mzt;*.mzf;*.m12;*.mzm;*.gz)\0*.wav;*.cas;*.mzt;*.mzf;*.m12;*.mzm;*.gz\0All Files (*.*)\0*.*\0\0")
+ 		     : _T("Supported Files (*.wav;*.cas)\0*.wav;*.cas\0All Files (*.*)\0*.*\0\0"),
+ #elif defined(_MZ80B) || defined(_MZ2000) || defined(_MZ2200)
+ 		play ? _T("Supported Files (*.wav;*.cas;*.mzt;*.mzf;*.mti;*.mtw;*.dat;*.gz)\0*.wav;*.cas;*.mzt;*.mzf;*.mti;*.mtw;*.dat;*.gz\0All Files (*.*)\0*.*\0\0")
+@@ -3265,6 +3265,7 @@
+ 	   check_file_extension(path, _T(".mzt")) || 
+ 	   check_file_extension(path, _T(".mzf")) || 
+ 	   check_file_extension(path, _T(".m12")) || 
++	   check_file_extension(path, _T(".mzm")) || 
+ 	   check_file_extension(path, _T(".mti")) || 
+ 	   check_file_extension(path, _T(".mtw")) || 
+ 	   check_file_extension(path, _T(".tap")) || 

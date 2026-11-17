@@ -1,0 +1,123 @@
+--- a/src/vm/datarec.h
++++ b/src/vm/datarec.h
+@@ -37,7 +37,7 @@
+ 	int register_id;
+ 	bool play, rec;
+ 	bool in, out, change, remote, trig;
+-	bool is_wav, is_tap, is_mzt;
++	bool is_wav, is_tap, is_mzt, is_mzm;
+ 	
+ 	int bufcnt, samples;
+ 	int ch, sample_rate, sample_bits;
+@@ -55,6 +55,7 @@
+ 	
+ 	int load_tap_image();
+ 	int load_mzt_image();
++	int load_mzm_image();
+ 	
+ public:
+ 	DATAREC(VM* parent_vm, EMU* parent_emu) : DEVICE(parent_vm, parent_emu) {
+--- a/src/vm/datarec.cpp
++++ b/src/vm/datarec.cpp
+@@ -49,7 +49,7 @@
+ 	register_id = -1;
+ 	play = rec = false;
+ 	in = out = change = remote = trig = false;
+-	is_wav = is_tap = is_mzt = false;
++	is_wav = is_tap = is_mzt = is_mzm = false;
+ }
+ 
+ void DATAREC::reset()
+@@ -184,6 +184,7 @@
+ 		is_wav = check_file_extension(file_path, _T(".wav"));
+ 		is_tap = check_file_extension(file_path, _T(".tap"));
+ 		is_mzt = check_file_extension(file_path, _T(".mzt")) || check_file_extension(file_path, _T(".m12"));
++		is_mzm = check_file_extension(file_path, _T(".mzm"));
+ 		
+ 		// load image file
+ 		load_image();
+@@ -203,7 +204,7 @@
+ 		
+ 		// check file extension
+ 		is_wav = check_file_extension(file_path, _T(".wav"));
+-		is_tap = is_mzt = false; // not supported for record
++		is_tap = is_mzt = is_mzm = false; // not supported for record
+ 		
+ 		// open for rec
+ 		if(is_wav) {
+@@ -268,6 +269,10 @@
+ 		// SHARP MZ series tape image
+ 		remain = load_mzt_image();
+ 	}
++	else if(is_mzm) {
++		// SHARP MZ series tape image for text file 
++		remain = load_mzm_image();
++	}
+ 	else {
+ 		memset(buffer, 0x7f, sizeof(buffer));
+ 		fio->Fread(buffer, sizeof(buffer), 1);
+@@ -589,4 +594,53 @@
+ 	}
+ 	return ptr;
+ }
++
++int DATAREC::load_mzm_image()
++{
++	int ptr = 0, count;
++	
++	// fill buffer with no signals
++	memset(buffer, 0x7f, sizeof(buffer));
++	
++    if (remain > 128) {
++		// load header
++		uint8 header[128], ram[0x20000];
++		fio->Fread(header, sizeof(header), 1);
++		remain -= sizeof(header);
++		
++		uint16 size = header[0x12] | (header[0x13] << 8);
++		uint16 offs = header[0x14] | (header[0x15] << 8);
++		memset(ram, 0, sizeof(ram));
++		fio->Fread(ram + offs, size, 1);
++
++		// output header
++		MZT_PUT_BIT(0, 10000);
++		MZT_PUT_BIT(1, 40);
++		MZT_PUT_BIT(0, 40);
++		MZT_PUT_BIT(1, 1);
++		MZT_PUT_BLOCK(header, 128);
++		MZT_PUT_BIT(1, 1);
++		MZT_PUT_BIT(0, 256);
++		MZT_PUT_BLOCK(header, 128);
++		MZT_PUT_BIT(1, 1);
++
++        // output data blocks
++	    while(size > 0) {
++		    MZT_PUT_BIT(0, 10000);
++		    MZT_PUT_BIT(1, 20);
++		    MZT_PUT_BIT(0, 20);
++		    MZT_PUT_BIT(1, 1);
++            if (size > 256) {
++		        MZT_PUT_BLOCK(ram + offs, 256);
++                size -= 256;
++                offs += 256;
++            } else {
++                MZT_PUT_BLOCK(ram + offs, size);
++                size = 0;
++            }
++		    MZT_PUT_BIT(1, 1);
++        }
++	}
++	return ptr;
++}
+ 
+--- a/src/winmain.cpp
++++ b/src/winmain.cpp
+@@ -1723,7 +1723,7 @@
+ 		play ? _T("Supported Files (*.wav;*.cas;*.tap)\0*.wav;*.cas;*.tap\0All Files (*.*)\0*.*\0\0")
+ 		     : _T("Supported Files (*.wav;*.cas)\0*.wav;*.cas\0All Files (*.*)\0*.*\0\0"),
+ #elif defined(DATAREC_MZT)
+-		play ? _T("Supported Files (*.wav;*.cas;*.mzt;*.m12)\0*.wav;*.cas;*.mzt;*.m12\0All Files (*.*)\0*.*\0\0")
++		play ? _T("Supported Files (*.wav;*.cas;*.mzt;*.m12;*.mzm)\0*.wav;*.cas;*.mzt;*.m12;*.mzm\0All Files (*.*)\0*.*\0\0")
+ 		     : _T("Supported Files (*.wav;*.cas)\0*.wav;*.cas\0All Files (*.*)\0*.*\0\0"),
+ #else
+ 		_T("Supported Files (*.wav;*.cas)\0*.wav;*.cas\0All Files (*.*)\0*.*\0\0"),
